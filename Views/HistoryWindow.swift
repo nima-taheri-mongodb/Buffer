@@ -256,21 +256,66 @@ class HistoryWindowController: NSWindowController {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
     }
 
-    /// The screen the user is working on: the screen containing the mouse
-    /// cursor, falling back to the screen of the frontmost application's
-    /// window, then to the main screen.
+    /// The screen the user is working on: the screen of the frontmost
+    /// application's focused window, falling back to its frontmost on-screen
+    /// window, the screen under the mouse cursor, then the main screen.
     private func activeScreen() -> NSScreen? {
-        let mouseLocation = NSEvent.mouseLocation
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) {
+        if let focusedFrame = focusedWindowFrameOfFrontmostApp(),
+           let screen = screenContainingWindowFrame(focusedFrame) {
             return screen
         }
-        if let screen = screenOfFrontmostApplicationWindow() {
+        if let frontmostFrame = frontmostApplicationWindowFrame(),
+           let screen = screenContainingWindowFrame(frontmostFrame) {
+            return screen
+        }
+        let mouseLocation = NSEvent.mouseLocation
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) {
             return screen
         }
         return NSScreen.main
     }
 
-    private func screenOfFrontmostApplicationWindow() -> NSScreen? {
+    /// Frame of the frontmost application's focused window in AppKit global
+    /// coordinates, via the Accessibility API.
+    private func focusedWindowFrameOfFrontmostApp() -> NSRect? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var focusedWindow: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedWindowAttribute as CFString,
+            &focusedWindow
+        ) == .success, let focusedWindow = focusedWindow else { return nil }
+        let window = focusedWindow as! AXUIElement
+
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+            AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+            let position = positionValue, let size = sizeValue
+        else { return nil }
+
+        var topLeft = CGPoint.zero
+        var windowSize = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &topLeft),
+              AXValueGetValue(size as! AXValue, .cgSize, &windowSize) else { return nil }
+
+        // AX reports the top-left corner in top-left-origin global coordinates;
+        // convert to AppKit's bottom-left-origin global coordinates.
+        let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height ?? 0
+        return NSRect(
+            x: topLeft.x,
+            y: primaryHeight - topLeft.y - windowSize.height,
+            width: windowSize.width,
+            height: windowSize.height
+        )
+    }
+
+    /// Frame of the frontmost application's frontmost on-screen window in
+    /// AppKit global coordinates, via the CG window list. Fallback for when
+    /// the Accessibility API can't provide the focused window.
+    private func frontmostApplicationWindowFrame() -> NSRect? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         guard let windowList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
@@ -280,14 +325,15 @@ class HistoryWindowController: NSWindowController {
             ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier
         })?[kCGWindowBounds as String] as? [String: CGFloat],
         let width = bounds["Width"], let height = bounds["Height"] else { return nil }
-        // CG window bounds use a top-left origin; convert the window center to
-        // AppKit's bottom-left-origin global coordinates before matching screens.
+        // CG window bounds use a top-left origin; convert to AppKit's
+        // bottom-left-origin global coordinates.
         let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height ?? 0
-        let center = NSPoint(
-            x: (bounds["X"] ?? 0) + width / 2,
-            y: primaryHeight - ((bounds["Y"] ?? 0) + height / 2)
+        return NSRect(
+            x: bounds["X"] ?? 0,
+            y: primaryHeight - (bounds["Y"] ?? 0) - height,
+            width: width,
+            height: height
         )
-        return NSScreen.screens.first { $0.frame.contains(center) }
     }
 }
 
