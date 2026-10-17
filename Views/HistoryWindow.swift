@@ -193,7 +193,7 @@ class HistoryWindowController: NSWindowController {
         // Compute reset decision *before* super.showWindow fires didBecomeKeyNotification
         // → bufferWindowDidOpen, so the content view onReceive handler sees the right value.
         shouldResetOnOpen = shouldResetSearch
-        ensureWindowIsVisibleOnScreen()
+        positionWindowOnActiveScreen()
         super.showWindow(sender)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
@@ -201,15 +201,51 @@ class HistoryWindowController: NSWindowController {
         UpdateService.shared.checkOnWindowOpenIfNeeded()
     }
 
-    private func ensureWindowIsVisibleOnScreen() {
-        guard let window = window else { return }
-        let currentFrame = window.frame
-        let isVisible = NSScreen.screens.contains { screen in
-            screen.visibleFrame.intersects(currentFrame)
+    /// Centers the window on the screen the user is currently working on so the
+    /// history panel reliably opens on the active monitor. The saved frame's
+    /// size is kept; only the origin is overridden on each show.
+    private func positionWindowOnActiveScreen() {
+        guard let window = window, let screen = activeScreen() else { return }
+        let visibleFrame = screen.visibleFrame
+        let frame = window.frame
+        window.setFrameOrigin(NSPoint(
+            x: visibleFrame.midX - frame.width / 2,
+            y: visibleFrame.midY - frame.height / 2
+        ))
+    }
+
+    /// The screen the user is working on: the screen containing the mouse
+    /// cursor, falling back to the screen of the frontmost application's
+    /// window, then to the main screen.
+    private func activeScreen() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) {
+            return screen
         }
-        if !isVisible {
-            window.center()
+        if let screen = screenOfFrontmostApplicationWindow() {
+            return screen
         }
+        return NSScreen.main
+    }
+
+    private func screenOfFrontmostApplicationWindow() -> NSScreen? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        guard let bounds = windowList.first(where: {
+            ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier
+        })?[kCGWindowBounds as String] as? [String: CGFloat],
+        let width = bounds["Width"], let height = bounds["Height"] else { return nil }
+        // CG window bounds use a top-left origin; convert the window center to
+        // AppKit's bottom-left-origin global coordinates before matching screens.
+        let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height ?? 0
+        let center = NSPoint(
+            x: (bounds["X"] ?? 0) + width / 2,
+            y: primaryHeight - ((bounds["Y"] ?? 0) + height / 2)
+        )
+        return NSScreen.screens.first { $0.frame.contains(center) }
     }
 }
 
